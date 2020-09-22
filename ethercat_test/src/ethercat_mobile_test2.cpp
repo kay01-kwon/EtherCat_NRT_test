@@ -11,9 +11,6 @@ int main(int argc, char **argv)
 
     ethercat_mobile_test.ecat_init();
 
-    osal_usleep(1e3);
-    
-
     while (ros::ok())
     {
         ethercat_mobile_test.EPOS_OP();
