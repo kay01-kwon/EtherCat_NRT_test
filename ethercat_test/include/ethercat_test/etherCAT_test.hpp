@@ -28,9 +28,6 @@ int started[NUMOFWHEEL_DRIVE] = {0};
 int ServoState = 0;
 int TargetState = 0;
 
-uint8 servo_ready = 0;
-uint8 servo_prestate = 0;
-
 char IOmap[4096];
 int expectedWKC;
 boolean needlf;
@@ -41,6 +38,10 @@ uint8 currentgroup = 0;
 char ecat_ifname[32] = "eth0";
 int run = 1;
 int sys_ready = 0;
+uint8 servo_ready = 0;
+uint8 servo_prestate = 0;
+unsigned long ready_cnt = 0;
+uint16 controlword;
 
 int32_t wheel_des[NUMOFWHEEL_DRIVE] = {0};
 
@@ -48,8 +49,6 @@ int os;
 uint32_t ob_32;
 uint16_t ob_16;
 uint8_t ob_8;
-
-unsigned long ready_cnt = 0;
 
 struct timespec ts, tleft;
 int64 t_ts = 0;
@@ -59,7 +58,7 @@ uint32_t diff_dc32;
 long long cur_DC_time;
 long long toff = 0;
 uint32_t mask = 0xffffffff;
-int32_t shift_time = 380000;
+int32_t shift_time = 5000000;
 
 class etherCAT_test{
 
@@ -88,7 +87,7 @@ boolean etherCAT_test::ecat_init()
     cout<<"Starting DC test\n";
     if(ec_init(ecat_ifname))
     {
-        cout<<"ec_init on "<<ecat_ifname<<"succeeded. \n";
+        cout<<"ec_init on "<<ecat_ifname<<" succeeded. \n";
         if(ec_config_init(FALSE) > 0)
         {
             cout<<ec_slavecount<<" slaves found and configured. \n";
@@ -113,10 +112,12 @@ boolean etherCAT_test::ecat_init()
         inOP = FALSE;
     }
 
+    osal_usleep(10000);
+
     if(inOP == TRUE)
     {
         for(int i = 0; i < NUMOFWHEEL_DRIVE; ++i)
-            ec_dcsync0(i+1, TRUE,cycle_ns,0);
+            ec_dcsync0(i+1, TRUE, cycle_ns, 0);
     }
 
     int64 cur_time = 0;
@@ -136,8 +137,9 @@ boolean etherCAT_test::ecat_init()
     cout<<"Remain time to next cycle : "<<remain_time<<endl;
 
     wkc = ec_receive_processdata(EC_TIMEOUTRET);
+
     cur_dc32 = (uint32_t) (ec_DCtime & mask);
-    dc_remain_time = cur_dc32 % cycle_time;
+    dc_remain_time = cur_dc32 % cycle_ns;
     t_ts = cycle_time + dc_remain_time;
 
     ts.tv_sec = t_ts / NSEC_PER_SEC;
@@ -167,7 +169,6 @@ void etherCAT_test::control_input_subscriber_setting()
 
 void etherCAT_test::EPOS_OP()
 {
-    uint16_t controlword = 0;
     vel measure_msg;
 
     t_ts = addtimespec(&ts,cycle_ns + toff);
@@ -178,6 +179,8 @@ void etherCAT_test::EPOS_OP()
 
     ec_send_processdata();
     wkc = ec_receive_processdata(EC_TIMEOUTRET);
+    if(wkc < 3 * NUMOFWHEEL_DRIVE)
+        cout<<"wkc fail : "<<wkc<<endl;
 
     cur_dc32 = (uint32_t) (ec_DCtime & mask);
     if(cur_dc32 > pre_dc32)
@@ -191,14 +194,17 @@ void etherCAT_test::EPOS_OP()
     toff = dc_pi_sync(cur_DC_time,cycle_ns,shift_time);
 
     // Servo On
-    for(int i = 0; i< NUMOFWHEEL_DRIVE; ++i)
+    for(int i = 0; i < NUMOFWHEEL_DRIVE; ++i)
     {
         controlword = 0;
         started[i] = ServoOn_GetCtrlWrd(epos4_drive_pt[i].ptInParam->StatusWord,&controlword);
         epos4_drive_pt[i].ptOutParam->ControlWord = controlword;
         if(started[i]) 
             ServoState |= (1<<i);
+        
+        //cout<<started[i]<<"\t";
     }
+    //cout<<endl;
 
     if(ServoState == (1<<NUMOFWHEEL_DRIVE)-1)
     {
@@ -206,7 +212,7 @@ void etherCAT_test::EPOS_OP()
             servo_ready = 1;
     }
     if(servo_ready) ready_cnt++;
-    if(ready_cnt>=500)
+    if(ready_cnt>=50)
     {
         ready_cnt = 10000;
         sys_ready = 1;
@@ -259,7 +265,7 @@ void etherCAT_test::EC_configuration()
     ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 4);
 
     /* configure DC options for every DC capable slave found in the list */
-    cout<<"DC capable : "<<ec_configdc()<<"\n";
+    printf("DC capable : %d \n",ec_configdc());
 
     oloop = ec_slave[0].Obytes;
     if ((oloop == 0) && (ec_slave[0].Obits > 0)) oloop = 1;
@@ -270,7 +276,7 @@ void etherCAT_test::EC_configuration()
     cout<<"Request operational state for all slaves\n";
     expectedWKC = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
     
-    cout<<"Caculated workcounter"<<expectedWKC<<"\n";
+    cout<<"Caculated workcounter : "<<expectedWKC<<"\n";
     ec_slave[0].state = EC_STATE_OPERATIONAL;
 
     ec_send_processdata();
