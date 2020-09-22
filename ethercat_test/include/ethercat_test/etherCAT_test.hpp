@@ -18,9 +18,10 @@
 
 using ethercat_test::vel;
 using std::cout;
+using std::endl;
 
 // Cycle nano second : 10 ms
-unsigned int cycle_ns = 10e6;
+unsigned int cycle_ns = 10000000;
 
 EPOS4_Drive_pt epos4_drive_pt[NUMOFWHEEL_DRIVE];
 int started[NUMOFWHEEL_DRIVE] = {0};
@@ -52,6 +53,13 @@ unsigned long ready_cnt = 0;
 
 struct timespec ts, tleft;
 int64 t_ts = 0;
+uint32_t cur_dc32;
+uint32_t pre_dc32;
+uint32_t diff_dc32;
+long long cur_DC_time;
+long long toff = 0;
+uint32_t mask = 0xffffffff;
+int32_t shift_time = 380000;
 
 class etherCAT_test{
 
@@ -111,6 +119,32 @@ boolean etherCAT_test::ecat_init()
             ec_dcsync0(i+1, TRUE,cycle_ns,0);
     }
 
+    int64 cur_time = 0;
+    int64 cur_cycle_cnt = 0;
+    int64 cycle_time;
+    int64 remain_time;
+    int64 dc_remain_time;
+
+    ec_send_processdata();
+    clock_gettime(CLOCK_MONOTONIC,&ts);
+    cur_time = ts.tv_nsec + ts.tv_sec * NSEC_PER_SEC;
+    cur_cycle_cnt = cur_time / cycle_ns;
+    cycle_time = cur_cycle_cnt * cycle_ns;
+    remain_time = cur_time % cycle_ns;
+
+    cout<<"Cycles have been passed : "<<cur_cycle_cnt<<endl;
+    cout<<"Remain time to next cycle : "<<remain_time<<endl;
+
+    wkc = ec_receive_processdata(EC_TIMEOUTRET);
+    cur_dc32 = (uint32_t) (ec_DCtime & mask);
+    dc_remain_time = cur_dc32 % cycle_time;
+    t_ts = cycle_time + dc_remain_time;
+
+    ts.tv_sec = t_ts / NSEC_PER_SEC;
+    ts.tv_nsec = t_ts % NSEC_PER_SEC;
+
+    clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&ts,&tleft);
+
     return inOP;
 }
 
@@ -136,17 +170,34 @@ void etherCAT_test::EPOS_OP()
     uint16_t controlword = 0;
     vel measure_msg;
 
+    t_ts = addtimespec(&ts,cycle_ns + toff);
+    ts.tv_sec = t_ts / NSEC_PER_SEC;
+    ts.tv_nsec = t_ts % NSEC_PER_SEC;
+
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
 
     ec_send_processdata();
     wkc = ec_receive_processdata(EC_TIMEOUTRET);
-    
+
+    cur_dc32 = (uint32_t) (ec_DCtime & mask);
+    if(cur_dc32 > pre_dc32)
+        diff_dc32 = cur_dc32 - pre_dc32;
+    else
+    {
+        diff_dc32 = (mask - pre_dc32) + cur_dc32;
+    }
+    cur_DC_time += diff_dc32;
+
+    toff = dc_pi_sync(cur_DC_time,cycle_ns,shift_time);
+
     // Servo On
     for(int i = 0; i< NUMOFWHEEL_DRIVE; ++i)
     {
         controlword = 0;
         started[i] = ServoOn_GetCtrlWrd(epos4_drive_pt[i].ptInParam->StatusWord,&controlword);
         epos4_drive_pt[i].ptOutParam->ControlWord = controlword;
-        if(started[i]) ServoState |= (1<<i); 
+        if(started[i]) 
+            ServoState |= (1<<i);
     }
 
     if(ServoState == (1<<NUMOFWHEEL_DRIVE)-1)
@@ -155,7 +206,7 @@ void etherCAT_test::EPOS_OP()
             servo_ready = 1;
     }
     if(servo_ready) ready_cnt++;
-    if(ready_cnt>=1000)
+    if(ready_cnt>=500)
     {
         ready_cnt = 10000;
         sys_ready = 1;
